@@ -5,7 +5,7 @@ Collects thread titles and comments from LIHKG public category pages,
 for use as training data (e.g. a text-classification / detection model).
 
 Usage:
-    python lihkg_scraper.py --cat_id 1 --pages 5 --out lihkg_data.csv
+    python lihkgScraper.py --cat_id 1 --pages 5 --out lihkg_data.csv
 
 Notes:
 - Uses LIHKG's public (unofficial) JSON API, no login required for
@@ -27,27 +27,60 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "Accept": "application/json",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-HK,zh;q=0.9,en;q=0.8",
+    "Origin": "https://lihkg.com",
 }
+
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
+
+
+def warm_session():
+    """Hit the homepage first so Cloudflare can set cookies."""
+    resp = SESSION.get("https://lihkg.com/", timeout=15)
+    resp.raise_for_status()
+
+
+def api_get(url, params=None, referer="https://lihkg.com/"):
+    last_resp = None
+    for attempt in range(5):
+        resp = SESSION.get(
+            url,
+            params=params,
+            headers={"Referer": referer},
+            timeout=15,
+        )
+        last_resp = resp
+        if resp.status_code == 429:
+            wait = 5 * (attempt + 1)
+            print(f"  [rate limit] waiting {wait}s...")
+            time.sleep(wait)
+            continue
+        if resp.status_code == 403:
+            raise requests.HTTPError(
+                "403 Forbidden (Cloudflare). The request was blocked as a bot; "
+                "retry later or from a different network.",
+                response=resp,
+            )
+        resp.raise_for_status()
+        return resp.json()
+    last_resp.raise_for_status()
 
 
 def get_category_threads(cat_id, page=1, count=60):
     """Fetch one page of thread listings from a category."""
     url = f"{BASE_URL}/thread/category"
     params = {"cat_id": cat_id, "page": page, "count": count, "type": "now"}
-    resp = requests.get(url, headers=HEADERS, params=params, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+    return api_get(url, params=params, referer=f"https://lihkg.com/category/{cat_id}")
 
 
 def get_thread_page(thread_id, page=1):
     """Fetch one page of comments for a given thread."""
     url = f"{BASE_URL}/thread/{thread_id}/page/{page}"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    return resp.json()
+    return api_get(url, referer=f"https://lihkg.com/thread/{thread_id}/page/{page}")
 
 
 def scrape_category_threads(cat_id, max_pages, delay=1.5):
@@ -104,6 +137,9 @@ def main():
     parser.add_argument("--delay", type=float, default=1.5, help="Delay in seconds between requests")
     parser.add_argument("--out", default="lihkg_data.csv", help="Output CSV filename")
     args = parser.parse_args()
+
+    print("Warming session against lihkg.com...")
+    warm_session()
 
     print(f"Fetching thread list from category {args.cat_id}...")
     threads = scrape_category_threads(args.cat_id, args.pages, args.delay)
