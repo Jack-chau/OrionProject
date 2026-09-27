@@ -44,9 +44,20 @@ def warm_session():
     resp.raise_for_status()
 
 
+def wait_after_429(resp, attempt):
+    """Honor Retry-After when present, otherwise back off exponentially."""
+    retry_after = resp.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(int(retry_after), 1)
+        except ValueError:
+            pass
+    return min(30 * (2 ** attempt), 300)
+
+
 def api_get(url, params=None, referer="https://lihkg.com/"):
     last_resp = None
-    for attempt in range(5):
+    for attempt in range(8):
         resp = SESSION.get(
             url,
             params=params,
@@ -55,8 +66,8 @@ def api_get(url, params=None, referer="https://lihkg.com/"):
         )
         last_resp = resp
         if resp.status_code == 429:
-            wait = 5 * (attempt + 1)
-            print(f"  [rate limit] waiting {wait}s...")
+            wait = wait_after_429(resp, attempt)
+            print(f"  [rate limit] waiting {wait}s (attempt {attempt + 1}/8)...")
             time.sleep(wait)
             continue
         if resp.status_code == 403:
@@ -67,7 +78,11 @@ def api_get(url, params=None, referer="https://lihkg.com/"):
             )
         resp.raise_for_status()
         return resp.json()
-    last_resp.raise_for_status()
+    raise requests.HTTPError(
+        "429 Too Many Requests after several retries. "
+        "Wait a few minutes, then rerun with a higher --delay (e.g. --delay 5).",
+        response=last_resp,
+    )
 
 
 def get_category_threads(cat_id, page=1, count=60):
@@ -134,12 +149,13 @@ def main():
     parser.add_argument("--cat_id", type=int, default=1, help="Category ID to scrape")
     parser.add_argument("--pages", type=int, default=5, help="Number of category listing pages to fetch")
     parser.add_argument("--max_comment_pages", type=int, default=None, help="Cap comment pages per thread (default: all)")
-    parser.add_argument("--delay", type=float, default=1.5, help="Delay in seconds between requests")
+    parser.add_argument("--delay", type=float, default=3.0, help="Delay in seconds between requests")
     parser.add_argument("--out", default="lihkg_data.csv", help="Output CSV filename")
     args = parser.parse_args()
 
     print("Warming session against lihkg.com...")
     warm_session()
+    time.sleep(args.delay)
 
     print(f"Fetching thread list from category {args.cat_id}...")
     threads = scrape_category_threads(args.cat_id, args.pages, args.delay)
